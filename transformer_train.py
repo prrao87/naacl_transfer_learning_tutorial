@@ -1,5 +1,5 @@
-from collections import namedtuple
-from multiprocessing import cpu_count
+import argparse
+import multiprocessing
 import os
 import torch
 import torch.nn.functional as F
@@ -13,33 +13,18 @@ from ignite.contrib.handlers import PiecewiseLinear, ProgressBar
 from transformer_utils import TextProcessor, read_sst2, create_dataloader
 from transformer_model import TransformerWithClfHead
 
-TEXT_COL, LABEL_COL = 'text', 'label'
-MAX_LENGTH = 256
-BATCH_SIZE = 16
-LOG_DIR = "./logs/"
-CACHE_DIR = "./cache/"
-DATASET_DIR = "./data/sst2"
-# Define device
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-n_cpu = cpu_count()
-
-# Config settings
-FineTuningConfig = namedtuple('FineTuningConfig', field_names="num_classes, dropout, \
-                                init_range, batch_size, lr, max_norm, n_epochs, n_warmup, \
-                                valid_pct, gradient_acc_steps, device, log_dir")
-
-finetuning_config = FineTuningConfig(2, 0.05, 0.02, BATCH_SIZE, 6.5e-5, 1.0, 2,
-                                     10, 0.1, 2, device, LOG_DIR)
+PRETRAINED_MODEL_URL = "https://s3.amazonaws.com/models.huggingface.co/naacl-2019-tutorial/"
+TEXT_COL, LABEL_COL = 'text', 'label'  # Column names in pd.DataFrame for sst dataset
+n_cpu = multiprocessing.cpu_count()
 
 
-def load_pretrained_model():
+def load_pretrained_model(args):
     "download pre-trained model and config"
-    state_dict = torch.load(cached_path("https://s3.amazonaws.com/models.huggingface.co/"
-                                        "naacl-2019-tutorial/model_checkpoint.pth"), map_location='cpu')
-    config = torch.load(cached_path("https://s3.amazonaws.com/models.huggingface.co/"
-                                    "naacl-2019-tutorial/model_training_args.bin"))
+    state_dict = torch.load(cached_path(os.path.join(args.model_checkpoint, "model_checkpoint.pth")),
+                            map_location='cpu')
+    config = torch.load(cached_path(os.path.join(args.model_checkpoint, "model_training_args.bin")))
     # Initialize model: Transformer base + classifier head
-    model = TransformerWithClfHead(config=config, fine_tuning_config=finetuning_config).to(finetuning_config.device)
+    model = TransformerWithClfHead(config=config, fine_tuning_config=args).to(args.device)
     incompatible_keys = model.load_state_dict(state_dict, strict=False)
     print(f"Parameters discarded from the pretrained model: {incompatible_keys.unexpected_keys}")
     print(f"Parameters added in the model: {incompatible_keys.missing_keys}")
@@ -48,40 +33,62 @@ def load_pretrained_model():
 
 
 def train():
-    "Trainer method"
-    datasets = read_sst2(DATASET_DIR)
-    labels = list(set(datasets["train"][LABEL_COL].tolist()))
-    label2int = {label: i for i, label in enumerate(labels)}
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_lower_case=False)
-    processor = TextProcessor(tokenizer, label2int, max_length=MAX_LENGTH)
-    
-    train_dl, valid_dl = create_dataloader(datasets["dev"], processor,
-                                           batch_size=finetuning_config.batch_size,
-                                           valid_pct=finetuning_config.valid_pct)
-    # val_dl = create_dataloader(datasets["dev"], processor,
-    #                            batch_size=finetuning_config.batch_size,
-    #                            valid_pct=None)
-    test_dl = create_dataloader(datasets["test"], processor, 
-                                batch_size=finetuning_config.batch_size,
-                                valid_pct=None)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_checkpoint", type=str, default=PRETRAINED_MODEL_URL, help="Path to the pretrained model checkpoint")
+    parser.add_argument("--dataset_path", type=str, default='./data/sst2', help="Directory to dataset.")
+    parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path to dataset cache")
+    parser.add_argument("--logdir", type=str, default='./logs', help="Path to logs")
+    parser.add_argument("--num_classes", type=int, default=2, help="Number of classes for the target classification task")
+    parser.add_argument("--dropout", type=float, default=0.05, help="Dropout for transformer module")
+    parser.add_argument("--clf_loss_coef", type=float, default=1, help="If >0 add a classification loss")
+    parser.add_argument("--train_batch_size", type=int, default=32, help="Batch size for training")
+    parser.add_argument("--valid_batch_size", type=int, default=32, help="Batch size for validation")
+    parser.add_argument("--valid_pct", type=float, default=0.1, help="Percentage of test data to use for validation")
+    parser.add_argument("--lr", type=float, default=6.25e-5, help="Learning rate")
+    parser.add_argument("--n_warmup", type=int, default=10, help="Number of warmup iterations")
+    parser.add_argument("--max_norm", type=float, default=1.0, help="Clipping gradient norm")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
+    parser.add_argument("--n_epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--gradient_acc_steps", type=int, default=2, help="Accumulate gradient")
+    parser.add_argument("--init_range", type=float, default=0.02, help="Normal initialization standard deviation")
+
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
+    args = parser.parse_args()
 
     # Define pretrained model and optimizer
-    model, state_dict, config = load_pretrained_model()
-    optimizer = AdamW(model.parameters(), lr=finetuning_config.lr, correct_bias=False)
+    model, state_dict, config = load_pretrained_model(args)
+    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=False)
+    # Define datasets
+    datasets = read_sst2(args.dataset_path)
+    labels = list(set(datasets["train"][LABEL_COL].tolist()))
+    label2int = {label: i for i, label in enumerate(labels)}
+    # Get BertTokenizer for this pretrained model
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_lower_case=False)
+    clf_token = tokenizer.vocab['[CLS]']  # classifier token
+    pad_token = tokenizer.vocab['[PAD]']  # pad token
+    processor = TextProcessor(tokenizer, label2int, clf_token, pad_token, max_length=config.num_max_positions)
+
+    train_dl, valid_dl = create_dataloader(datasets["dev"], processor,
+                                           batch_size=args.train_batch_size,
+                                           valid_pct=args.valid_pct)
+
+    test_dl = create_dataloader(datasets["test"], processor,
+                                batch_size=args.valid_batch_size,
+                                valid_pct=None)
 
     def update(engine, batch):
         "update function for training"
         model.train()
-        inputs, labels = (t.to(finetuning_config.device) for t in batch)
-        inputs = inputs.transpose(0, 1).contiguous()  # [S, B]
+        inputs, labels = (t.to(args.device) for t in batch)
+        inputs = inputs.transpose(0, 1).contiguous()  # to shape [seq length, batch]
         _, loss = model(inputs,
-                        clf_tokens_mask=(inputs == tokenizer.vocab[processor.CLS]), 
+                        clf_tokens_mask=(inputs == clf_token),
                         clf_labels=labels)
-        loss = loss / finetuning_config.gradient_acc_steps
+        loss = loss / args.gradient_acc_steps
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), finetuning_config.max_norm)
-        if engine.state.iteration % finetuning_config.gradient_acc_steps == 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_norm)
+        if engine.state.iteration % args.gradient_acc_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
         return loss.item()
@@ -90,11 +97,11 @@ def train():
         "update function for evaluation"
         model.eval()
         with torch.no_grad():
-            batch, labels = (t.to(finetuning_config.device) for t in batch)
-            inputs = batch.transpose(0, 1).contiguous()
+            batch, labels = (t.to(args.device) for t in batch)
+            inputs = batch.transpose(0, 1).contiguous()  # to shape [seq length, batch]
             logits = model(inputs,
-                           clf_tokens_mask=(inputs == tokenizer.vocab[processor.CLS]),
-                           padding_mask=(batch == tokenizer.vocab[processor.PAD]))
+                           clf_tokens_mask=(inputs == clf_token),
+                           padding_mask=(batch == pad_token))
         return logits, labels
 
     def predict(model, tokenizer, int2label, input="test"):
@@ -102,14 +109,14 @@ def train():
         tok = tokenizer.tokenize(input)
         ids = tokenizer.convert_tokens_to_ids(tok) + [tokenizer.vocab['[CLS]']]
         tensor = torch.tensor(ids, dtype=torch.long)
-        tensor = tensor.to(device)
+        tensor = tensor.to(args.device)
         tensor = tensor.reshape(1, -1)
-        tensor_in = tensor.transpose(0, 1).contiguous() # [S, 1]
+        tensor_in = tensor.transpose(0, 1).contiguous()  # to shape [seq length, batch]
         logits = model(tensor_in,
                        clf_tokens_mask=(tensor_in == tokenizer.vocab['[CLS]']),
                        padding_mask=(tensor == tokenizer.vocab['[PAD]']))
         val, _ = torch.max(logits, 0)
-        val = F.softmax(val, dim=0).detach().cpu().numpy()    
+        val = F.softmax(val, dim=0).detach().cpu().numpy()
         return {int2label[val.argmax()]: val.max(),
                 int2label[val.argmin()]: val.min()}
 
@@ -124,10 +131,10 @@ def train():
     def log_validation_results(engine):
         evaluator.run(valid_dl)
         print(f"validation epoch: {engine.state.epoch} acc: {100*evaluator.state.metrics['accuracy']}")
-  
+
     # lr schedule: linearly warm-up to lr and then to zero
-    scheduler = PiecewiseLinear(optimizer, 'lr', [(0, 0.0), (finetuning_config.n_warmup, finetuning_config.lr),
-                                (len(train_dl) * finetuning_config.n_epochs, 0.0)])
+    scheduler = PiecewiseLinear(optimizer, 'lr', [(0, 0.0), (args.n_warmup, args.lr),
+                                (len(train_dl) * args.n_epochs, 0.0)])
     trainer.add_event_handler(Events.ITERATION_STARTED, scheduler)
 
     # add progressbar with loss
@@ -135,7 +142,7 @@ def train():
     ProgressBar(persist=True).attach(trainer, metric_names=['loss'])
 
     # save checkpoints and finetuning config
-    checkpoint_handler = ModelCheckpoint(finetuning_config.log_dir, 'finetuning_checkpoint', 
+    checkpoint_handler = ModelCheckpoint(args.logdir, 'finetuning_checkpoint',
                                          save_interval=1, require_empty=False)
     trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {'sst2_model': model})
 
@@ -144,9 +151,9 @@ def train():
     # save metadata
     torch.save({
         "config": config,
-        "config_ft": finetuning_config,
+        "config_ft": args,
         "int2label": int2label
-    }, os.path.join(finetuning_config.log_dir, "metadata.bin"))
+    }, os.path.join(args.logdir, "metadata.bin"))
 
     # Run trainer
     trainer.run(train_dl, max_epochs=3)
@@ -154,7 +161,7 @@ def train():
     evaluator.run(test_dl)
     print(f"test results - acc: {100*evaluator.state.metrics['accuracy']:.3f}")
     # save model weights
-    torch.save(model.state_dict(), os.path.join(finetuning_config.log_dir, "model_weights.pth"))
+    torch.save(model.state_dict(), os.path.join(args.logdir, "model_weights.pth"))
 
 
 if __name__ == "__main__":
