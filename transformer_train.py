@@ -2,13 +2,13 @@ from collections import namedtuple
 from multiprocessing import cpu_count
 import os
 import torch
+import torch.nn.functional as F
 from pytorch_transformers import BertTokenizer, cached_path
 from pytorch_transformers.optimization import AdamW
 from ignite.engine import Engine, Events
 from ignite.metrics import RunningAverage, Accuracy
 from ignite.handlers import ModelCheckpoint
 from ignite.contrib.handlers import PiecewiseLinear, ProgressBar
-import torch.nn.functional as F
 
 from transformer_utils import TextProcessor, read_sst2, create_dataloader
 from transformer_model import TransformerWithClfHead
@@ -48,20 +48,13 @@ def load_pretrained_model():
 
 
 def train():
-    "Trainer"
+    "Trainer method"
     datasets = read_sst2(DATASET_DIR)
-
-    # Get list of labels from training data
     labels = list(set(datasets["train"][LABEL_COL].tolist()))
-    # Map labels to dict using zero-indexing
     label2int = {label: i for i, label in enumerate(labels)}
-
-    # Use BertTokenizer
     tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_lower_case=False)
-    # Initialize TextProcessor
     processor = TextProcessor(tokenizer, label2int, max_length=MAX_LENGTH)
-
-    # Create train, validation and test dataloaders
+    
     train_dl, valid_dl = create_dataloader(datasets["dev"], processor,
                                            batch_size=finetuning_config.batch_size,
                                            valid_pct=finetuning_config.valid_pct)
@@ -131,7 +124,7 @@ def train():
     def log_validation_results(engine):
         evaluator.run(valid_dl)
         print(f"validation epoch: {engine.state.epoch} acc: {100*evaluator.state.metrics['accuracy']}")
-     
+  
     # lr schedule: linearly warm-up to lr and then to zero
     scheduler = PiecewiseLinear(optimizer, 'lr', [(0, 0.0), (finetuning_config.n_warmup, finetuning_config.lr),
                                 (len(train_dl) * finetuning_config.n_epochs, 0.0)])
@@ -144,7 +137,7 @@ def train():
     # save checkpoints and finetuning config
     checkpoint_handler = ModelCheckpoint(finetuning_config.log_dir, 'finetuning_checkpoint', 
                                          save_interval=1, require_empty=False)
-    trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {'imdb_model': model})
+    trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {'sst2_model': model})
 
     int2label = {i: label for label, i in label2int.items()}
 
