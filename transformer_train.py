@@ -1,25 +1,17 @@
 from collections import namedtuple
-from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
-from itertools import repeat
-import numpy as np
-import pandas as pd
 import os
 import torch
-from torch.utils.data import TensorDataset, random_split, DataLoader
-from tqdm import tqdm_notebook as tqdm
-from typing import Tuple
 from pytorch_transformers import BertTokenizer, cached_path
 from pytorch_transformers.optimization import AdamW
 from ignite.engine import Engine, Events
-from ignite.metrics import RunningAverage, Accuracy 
+from ignite.metrics import RunningAverage, Accuracy
 from ignite.handlers import ModelCheckpoint
-from ignite.contrib.handlers import CosineAnnealingScheduler, PiecewiseLinear, create_lr_scheduler_with_warmup, ProgressBar
+from ignite.contrib.handlers import PiecewiseLinear, ProgressBar
 import torch.nn.functional as F
 
-from transformer_utils import (TextProcessor, read_sst2, process_row, create_dataloader, 
-                               get_and_tokenize_dataset)
-from transformer_model import Transformer, TransformerWithClfHead, get_num_params
+from transformer_utils import TextProcessor, read_sst2, create_dataloader
+from transformer_model import TransformerWithClfHead
 
 TEXT_COL, LABEL_COL = 'text', 'label'
 MAX_LENGTH = 256

@@ -108,33 +108,3 @@ def create_dataloader(df: pd.DataFrame,
                              pin_memory=torch.cuda.is_available())
     return data_loader
 
-
-def get_and_tokenize_dataset(dataset_dir: str, finetuning_config: namedtuple):
-    # Dataset path
-    datasets = read_sst2(dataset_dir)
-
-    # Get list of labels from training data
-    labels = list(set(datasets["train"][LABEL_COL].tolist()))
-    # Map labels to dict using zero-indexing
-    label2int = {label: i for i, label in enumerate(labels)}
-
-    # Use BertTokenizer
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_lower_case=False)
-    # Initialize TextProcessor
-    processor = TextProcessor(tokenizer, label2int, max_length=MAX_LENGTH)
-
-    # Create train, validation and test dataloaders
-    train_dl = create_dataloader(datasets["dev"], processor,
-                                 batch_size=finetuning_config.batch_size,
-                                 valid_pct=None)
-
-    # val_dl = create_dataloader(datasets["dev"], processor,
-    #                            batch_size=finetuning_config.batch_size,
-    #                            valid_pct=None)
-    val_dl = None
-
-    test_dl = create_dataloader(datasets["test"], processor, 
-                                batch_size=finetuning_config.batch_size,
-                                valid_pct=None)
-
-    return train_dl, val_dl, test_dl
